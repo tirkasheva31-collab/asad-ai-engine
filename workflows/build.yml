@@ -34,7 +34,7 @@ jobs:
           sdkmanager "ndk;27.2.12479018"
           echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
 
-      - name: Configure Android ARM64
+      - name: Configure ARM64
         run: |
           cmake -S llama.cpp -B build \
             -G Ninja \
@@ -52,18 +52,18 @@ jobs:
             -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_BUILD_SERVER=OFF
 
-      - name: Build
+      - name: Compile AI Engine
         run: |
           cmake --build build --config Release --parallel 2
 
       - name: Install libraries
         run: |
-          cmake --install build --prefix install
+          cmake --install build --prefix install --config Release
 
-      - name: Upload Asad AI Engine
+      - name: Upload ARM64 libraries
         uses: actions/upload-artifact@v4
         with:
-          name: asad-ai-android-arm64
+          name: Asad-AI-ARM64
           path: install/
           if-no-files-found: error
           
