@@ -27,9 +27,6 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          accept-android-sdk-licenses: false
-          packages: ''
 
       - name: Accept Android SDK licenses
         run: |
@@ -40,7 +37,7 @@ jobs:
           sdkmanager "ndk;27.2.12479018"
           echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
-      - name: Configure for Android ARM64
+      - name: Configure llama.cpp for Android ARM64
         run: |
           cmake -S llama.cpp -B build \
             -G Ninja \
@@ -53,12 +50,15 @@ jobs:
             -DGGML_OPENMP=OFF \
             -DGGML_LLAMAFILE=OFF \
             -DGGML_BACKEND_DL=OFF \
+            -DLLAMA_OPENSSL=OFF \
+            -DLLAMA_BUILD_COMMON=OFF \
+            -DLLAMA_BUILD_APP=OFF \
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_EXAMPLES=OFF \
-            -DLLAMA_BUILD_SERVER=OFF \
-            -DLLAMA_BUILD_TOOLS=OFF
+            -DLLAMA_BUILD_TOOLS=OFF \
+            -DLLAMA_BUILD_SERVER=OFF
 
-      - name: Build libraries
+      - name: Build Android ARM64 libraries
         run: |
           cmake --build build --config Release --parallel 2
 
