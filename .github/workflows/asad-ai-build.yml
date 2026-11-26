@@ -1,3 +1,4 @@
+
 name: Build Asad AI Engine
 
 on:
@@ -25,19 +26,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Setup Android SDK and NDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools ndk;27.2.12479018'
 
-      - name: Accept Android SDK licenses
+      - name: Set Android NDK path
         run: |
-          yes | sdkmanager --licenses
-
-      - name: Install Android NDK
-        run: |
-          sdkmanager "ndk;27.2.12479018"
           echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          test -f "$ANDROID_SDK_ROOT/ndk/27.2.12479018/build/cmake/android.toolchain.cmake"
 
-      - name: Configure llama.cpp for Android ARM64
+      - name: Configure llama.cpp
         run: |
           cmake -S llama.cpp -B build \
             -G Ninja \
@@ -47,18 +46,15 @@ jobs:
             -DANDROID_PLATFORM=android-28 \
             -DBUILD_SHARED_LIBS=ON \
             -DGGML_NATIVE=OFF \
+            -DGGML_CPU_KLEIDIAI=ON \
             -DGGML_OPENMP=OFF \
             -DGGML_LLAMAFILE=OFF \
-            -DGGML_BACKEND_DL=OFF \
             -DLLAMA_OPENSSL=OFF \
-            -DLLAMA_BUILD_COMMON=OFF \
-            -DLLAMA_BUILD_APP=OFF \
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_EXAMPLES=OFF \
-            -DLLAMA_BUILD_TOOLS=OFF \
             -DLLAMA_BUILD_SERVER=OFF
 
-      - name: Build Android ARM64 libraries
+      - name: Build Android ARM64
         run: |
           cmake --build build --config Release --parallel 2
 
