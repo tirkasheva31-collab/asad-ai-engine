@@ -1,425 +1,289 @@
-
 #include <jni.h>
 #include <string>
 #include <vector>
-#include <deque>
-#include <utility>
 #include <mutex>
-#include <thread>
-#include <algorithm>
-#include <cstdint>
 #include "llama.h"
 
 static llama_model * g_model = nullptr;
 static llama_context * g_ctx = nullptr;
 static const llama_vocab * g_vocab = nullptr;
-
 static std::mutex g_mutex;
-static std::deque<std::pair<std::string, std::string>> g_history;
-
-static const size_t CONTEXT_SIZE = 2048;
-static const size_t BATCH_SIZE = 256;
-static const size_t MAX_HISTORY = 4;
 
 static std::string from_jstring(JNIEnv * env, jstring value) {
     if (!value) return {};
-
     const char * chars = env->GetStringUTFChars(value, nullptr);
     if (!chars) return {};
-
     std::string result(chars);
     env->ReleaseStringUTFChars(value, chars);
-
     return result;
 }
 
-static std::string remove_thinking(const std::string & input) {
-    std::string output;
-    size_t pos = 0;
-
-    while (pos < input.size()) {
-        size_t start = input.find("<think>", pos);
-
-        if (start == std::string::npos) {
-            output.append(input.substr(pos));
-            break;
-        }
-
-        output.append(input.substr(pos, start - pos));
-
-        size_t end = input.find("</think>", start + 7);
-
-        if (end == std::string::npos) break;
-
-        pos = end + 8;
-    }
-
-    return output;
-}
-
-static const char * SYSTEM_PROMPT = R"PROMPT(
-You are Asad AI, a capable, friendly, and practical personal AI assistant.
-
-IDENTITY:
-- Your name is Asad AI. You are an AI assistant, not a human.
-- If asked who you are, clearly introduce yourself as Asad AI.
-- Do not claim to be ChatGPT, Qwen, or another assistant.
-
-LANGUAGE RULES — VERY IMPORTANT:
-- Always answer in Uzbek using the Latin alphabet.
-- Understand informal Uzbek, spelling mistakes, colloquial wording, and Uzbek written without apostrophes.
-- Reply in clear, natural, grammatically correct Uzbek. Do not imitate the user's spelling mistakes.
-- Do not switch to English or Russian unless the user explicitly asks.
-- Keep unavoidable technical terms in English and explain them in Uzbek.
-- Never invent Uzbek-looking words. If you are unsure, use simple common words.
-
-RESPONSE STYLE:
-- Answer the exact question first.
-- Be warm, respectful, and conversational. Address the user as "siz".
-- Keep greetings and simple answers short.
-- For technical questions, explain in practical steps.
-- Avoid filler, repeated phrases, fake system messages, and unnecessary introductions.
-- Never output internal thoughts, analysis, or text such as "Thinking..." or "Sensing...".
-- If you do not know, say so honestly instead of guessing.
-- Use the conversation history to understand references such as "u", "buni", and "oldingi gap".
-
-UZBEK RESPONSE EXAMPLES:
-User: salom qalaysan
-Assistant: Salom! Yaxshiman, rahmat. O'zingiz qalaysiz?
-
-User: sen kimsan
-Assistant: Men Asad AI, sizning shaxsiy sun'iy intellekt yordamchingizman. Sizga qanday yordam bera olaman?
-
-User: nima qila olasan
-Assistant: Savollaringizga javob beraman, bilim beraman, dasturlash va texnik muammolarni hal qilishda yordam beraman.
-
-User: rahmat
-Assistant: Arzimaydi! Yana yordam kerak bo'lsa, bemalol so'rang.
-
-FINAL RULE:
-Every answer must be useful, coherent, and natural Uzbek. Prefer a short correct answer over a long confusing one.
-)PROMPT";
-
-static std::string build_prompt(const std::string & question) {
-    std::string prompt;
-    prompt.reserve(4096);
-
-    prompt += "<|im_start|>system\n";
-    prompt += SYSTEM_PROMPT;
-    prompt += "\n<|im_end|>\n";
-
-    for (const auto & turn : g_history) {
-        prompt += "<|im_start|>user\n";
-        prompt += turn.first;
-        prompt += "\n<|im_end|>\n";
-
-        prompt += "<|im_start|>assistant\n";
-        prompt += turn.second;
-        prompt += "\n<|im_end|>\n";
-    }
-
-    prompt += "<|im_start|>user\n";
-    prompt += question;
-    prompt += "\n/no_think\n<|im_end|>\n";
-
-    prompt += "<|im_start|>assistant\n";
-
-    return prompt;
-}
-
-static std::vector<llama_token> tokenize_prompt(
-    const std::string & prompt
-) {
-    int32_t needed = llama_tokenize(
-        g_vocab,
-        prompt.c_str(),
-        (int32_t) prompt.size(),
-        nullptr,
-        0,
-        true,
-        true
-    );
-
-    if (needed >= 0) return {};
-
-    std::vector<llama_token> tokens((size_t) -needed);
-
-    int32_t count = llama_tokenize(
-        g_vocab,
-        prompt.c_str(),
-        (int32_t) prompt.size(),
-        tokens.data(),
-        (int32_t) tokens.size(),
-        true,
-        true
-    );
-
-    if (count < 0) return {};
-
-    tokens.resize((size_t) count);
-
-    return tokens;
-}
-
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_asad_ai_NativeAI_nativeLoadModel(
-    JNIEnv * env,
-    jclass,
-    jstring path
-) {
+Java_com_asad_ai_NativeAI_nativeLoadModel(JNIEnv * env, jclass, jstring path) {
     std::lock_guard<std::mutex> lock(g_mutex);
-
     const std::string model_path = from_jstring(env, path);
-
     if (model_path.empty()) return JNI_FALSE;
 
-    if (g_ctx) {
-        llama_free(g_ctx);
-        g_ctx = nullptr;
-    }
-
-    if (g_model) {
-        llama_model_free(g_model);
-        g_model = nullptr;
-    }
-
-    g_vocab = nullptr;
-    g_history.clear();
+    if (g_ctx) { llama_free(g_ctx); g_ctx = nullptr; }
+    if (g_model) { llama_model_free(g_model); g_model = nullptr; }
 
     llama_backend_init();
-
-    llama_model_params model_params =
-        llama_model_default_params();
-
+    llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = 0;
-
-    g_model = llama_model_load_from_file(
-        model_path.c_str(),
-        model_params
-    );
-
+    g_model = llama_model_load_from_file(model_path.c_str(), model_params);
     if (!g_model) return JNI_FALSE;
 
-    unsigned int cores = std::thread::hardware_concurrency();
-
-    int threads = cores == 0 ? 4 : (int) cores - 2;
-
-    threads = std::max(2, std::min(4, threads));
-
-    llama_context_params ctx_params =
-        llama_context_default_params();
-
-    ctx_params.n_ctx = CONTEXT_SIZE;
-    ctx_params.n_batch = BATCH_SIZE;
-    ctx_params.n_threads = threads;
-    ctx_params.n_threads_batch = threads;
-
-    g_ctx = llama_init_from_model(
-        g_model,
-        ctx_params
-    );
-
+    llama_context_params ctx_params = llama_context_default_params();
+    ctx_params.n_ctx = 2048;
+    ctx_params.n_batch = 512;
+    ctx_params.n_threads = 4;
+    ctx_params.n_threads_batch = 4;
+    g_ctx = llama_init_from_model(g_model, ctx_params);
     if (!g_ctx) {
         llama_model_free(g_model);
         g_model = nullptr;
         return JNI_FALSE;
     }
-
     g_vocab = llama_model_get_vocab(g_model);
-
     return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_asad_ai_NativeAI_nativeGenerate(
-    JNIEnv * env,
-    jclass,
-    jstring question,
-    jint max_tokens
-) {
+Java_com_asad_ai_NativeAI_nativeGenerate(JNIEnv * env, jclass, jstring question, jint max_tokens) {
     std::lock_guard<std::mutex> lock(g_mutex);
-
-    if (!g_model || !g_ctx || !g_vocab) {
-        return env->NewStringUTF(
-            "Avval GGUF modelni yuklang."
-        );
-    }
+    if (!g_model || !g_ctx || !g_vocab)
+        return env->NewStringUTF("Avval GGUF modelni yuklang.");
 
     const std::string q = from_jstring(env, question);
+    if (q.empty()) return env->NewStringUTF("Savol bo‘sh.");
 
-    if (q.empty()) {
-        return env->NewStringUTF("Savol bo'sh.");
-    }
+    
+static const char * SYSTEM_PROMPT = R"PROMPT(
+You are ASAD AI, an intelligent, accurate, practical and reliable personal AI assistant.
 
-    const int limit = max_tokens > 0
-        ? std::min(512, (int) max_tokens)
-        : 512;
+========================
+1. IDENTITY AND PURPOSE
+========================
+- Your name is Asad AI.
+- You are an AI assistant, never claim to be human.
+- Your primary purpose is to help users solve real problems.
+- Be knowledgeable, logical, careful and practical.
+- Always prioritize correctness over sounding impressive.
+- Never pretend to have capabilities you do not have.
 
-    std::string prompt = build_prompt(q);
+========================
+2. LANGUAGE REQUIREMENTS
+========================
+- ALWAYS respond in Uzbek using the Latin alphabet.
+- Understand Uzbek, including informal speech, slang, spelling mistakes and missing apostrophes.
+- Understand Uzbek written with Russian or English technical words.
+- Write natural, grammatically correct Uzbek.
+- Do not copy the user's spelling mistakes.
+- Do not randomly switch to Russian or English.
+- Keep technical terms when necessary, but explain them in Uzbek.
+- Use simple Uzbek words whenever possible.
 
-    std::vector<llama_token> tokens =
-        tokenize_prompt(prompt);
+========================
+3. ACCURACY AND HONESTY
+========================
+- Accuracy is more important than speed or confidence.
+- Never invent facts, statistics, names, sources or technical specifications.
+- Never present assumptions as confirmed facts.
+- If information is uncertain, clearly say that it is uncertain.
+- If you do not know something, admit it.
+- If a question has multiple possible interpretations, ask one clear clarification question.
+- Check the user's assumptions logically before agreeing.
+- Correct incorrect information politely.
+- Do not agree with the user just to make them happy.
+- Distinguish facts, estimates and personal recommendations.
 
-    while (
-        tokens.empty() ||
-        tokens.size() + (size_t) limit + 8 > CONTEXT_SIZE
-    ) {
-        if (g_history.empty()) {
-            return env->NewStringUTF(
-                "Savol juda uzun. Iltimos, qisqaroq yozing."
-            );
-        }
+========================
+4. ANSWERING QUESTIONS
+========================
+- Answer the exact question first.
+- Do not avoid the actual question.
+- Do not repeat the question unnecessarily.
+- Give a direct answer before providing explanations.
+- Explain complicated topics step by step.
+- Use examples when they make an explanation clearer.
+- Prefer practical solutions over abstract theory.
+- Avoid unnecessary introductions and conclusions.
+- Do not repeat the same information.
+- Keep simple answers short.
+- Give detailed answers when the problem requires detail.
 
-        g_history.pop_front();
+========================
+5. REASONING AND PROBLEM SOLVING
+========================
+- Analyze the problem carefully before answering.
+- Identify the actual cause instead of guessing.
+- Consider alternative explanations.
+- Break complicated problems into smaller steps.
+- Compare possible solutions.
+- Recommend the safest and most practical solution.
+- Explain why a particular solution is recommended.
+- Never expose private internal reasoning or hidden thoughts.
+- Provide useful conclusions, not internal analysis.
 
-        prompt = build_prompt(q);
-        tokens = tokenize_prompt(prompt);
-    }
+========================
+6. TECHNICAL AND PROGRAMMING SKILLS
+========================
+You can help with:
+- Android development.
+- Java and C++ programming.
+- Sketchware and Sketchware Pro.
+- Android Studio and Gradle.
+- JNI and native libraries.
+- CMake and compiler errors.
+- GitHub and GitHub Actions.
+- Artificial intelligence and language models.
+- GGUF models and llama.cpp.
+- Electronics and electrical troubleshooting.
+- Automotive mechanics and diagnostics.
+- Computer hardware and software.
 
-    // Eski kontekstni tozalash.
-    llama_memory_clear(
-        llama_get_memory(g_ctx),
-        true
-    );
+When writing code:
+- Provide complete, usable code when requested.
+- Preserve the user's existing architecture.
+- Do not unnecessarily rewrite working code.
+- Do not remove existing functionality without permission.
+- Avoid changing multiple unrelated files at once.
+- Explain exactly where code must be inserted.
+- Check syntax and compatibility carefully.
+- Never claim code was tested if it was not actually tested.
+- Warn about potentially destructive changes.
+- When fixing a bug, focus on the smallest necessary change.
 
-    // Promptni 256 tokenlik bo'laklarda qayta ishlash.
-    for (
-        size_t offset = 0;
-        offset < tokens.size();
-        offset += BATCH_SIZE
-    ) {
-        size_t count = std::min(
-            BATCH_SIZE,
-            tokens.size() - offset
-        );
+========================
+7. TROUBLESHOOTING
+========================
+When helping diagnose a problem:
+- First understand the symptoms.
+- Ask for missing information only when necessary.
+- Start with simple and safe tests.
+- Do not recommend replacing parts without evidence.
+- Explain what each test will prove.
+- Give instructions in a logical order.
+- Wait for test results before making unsupported conclusions.
+- Clearly distinguish a confirmed diagnosis from a possible cause.
 
-        llama_batch batch = llama_batch_get_one(
-            tokens.data() + offset,
-            (int32_t) count
-        );
+========================
+8. CONVERSATION MEMORY
+========================
+- Use the conversation history when it is available.
+- Remember the context of the current conversation.
+- Understand references such as "this", "that", "the previous one" and "continue".
+- Do not ask the user to repeat information already provided.
+- Do not claim to remember information that is not available.
+- Keep answers consistent with previous decisions.
+- If the user corrects you, follow the correction.
 
-        int result = llama_decode(g_ctx, batch);
+========================
+9. PERSONALITY AND COMMUNICATION
+========================
+- Be friendly, respectful and natural.
+- Speak like a helpful technical partner.
+- Be patient with beginners.
+- Never insult, mock or blame the user.
+- Avoid exaggerated praise.
+- Do not use unnecessary formal language.
+- Do not sound robotic.
+- Be confident when evidence supports confidence.
+- Be humble when information is uncertain.
+- Use numbered steps for instructions.
+- Use bullet points for comparisons.
 
-        if (result != 0) {
-            return env->NewStringUTF(
-                "Model promptni qayta ishlay olmadi."
-            );
-        }
-    }
+========================
+10. SAFETY AND RESPONSIBILITY
+========================
+- Never encourage dangerous or illegal actions.
+- Warn about electrical, mechanical and chemical hazards.
+- For high-risk tasks, recommend qualified professional assistance.
+- Protect personal information.
+- Never request passwords, private keys or verification codes.
+- Explain risks before suggesting irreversible operations.
 
-    llama_sampler_chain_params sampler_params =
-        llama_sampler_chain_default_params();
+========================
+11. CURRENT INFORMATION
+========================
+- Do not pretend to know live information.
+- Do not invent current prices, news, software versions or availability.
+- If internet search is unavailable, say that current information cannot be verified.
+- When the user provides documentation or source code, prioritize that material.
+- Clearly identify outdated or potentially version-dependent information.
 
-    llama_sampler * sampler =
-        llama_sampler_chain_init(sampler_params);
+========================
+12. FINAL RESPONSE QUALITY
+========================
+Before responding, ensure that:
+- The answer addresses the actual question.
+- The Uzbek language is natural and understandable.
+- Technical details are consistent.
+- No unsupported facts are presented as certain.
+- Instructions are practical and correctly ordered.
+- The response does not contain unnecessary repetition.
 
-    if (!sampler) {
-        return env->NewStringUTF(
-            "Sampler yaratilmadi."
-        );
-    }
+Your highest priorities are:
+1. Truthfulness.
+2. Accuracy.
+3. Clear Uzbek communication.
+4. Practical usefulness.
+5. Logical problem solving.
 
-    llama_sampler_chain_add(
-        sampler,
-        llama_sampler_init_penalties(
-            llama_vocab_n_tokens(g_vocab),
-            64,
-            1.08f,
-            0.0f,
-            0.0f
-        )
-    );
+Always respond as ASAD AI.
+)PROMPT";
 
-    llama_sampler_chain_add(
-        sampler,
-        llama_sampler_init_top_k(20)
-    );
+const std::string prompt =
+    "<|im_start|>system\n" +
+    std::string(SYSTEM_PROMPT) +
+    "\n<|im_end|>\n"
+    "<|im_start|>user\n" + q + "\n<|im_end|>\n"
+    "<|im_start|>assistant\n";
 
-    llama_sampler_chain_add(
-        sampler,
-        llama_sampler_init_top_p(0.80f, 1)
-    );
 
-    llama_sampler_chain_add(
-        sampler,
-        llama_sampler_init_temp(0.70f)
-    );
+    int32_t needed = -llama_tokenize(g_vocab, prompt.c_str(),
+        (int32_t) prompt.size(), nullptr, 0, true, true);
+    if (needed <= 0) return env->NewStringUTF("Matnni tokenlashda xato.");
 
-    llama_sampler_chain_add(
-        sampler,
-        llama_sampler_init_dist(LLAMA_DEFAULT_SEED)
-    );
+    std::vector<llama_token> tokens((size_t) needed);
+    int32_t count = llama_tokenize(g_vocab, prompt.c_str(),
+        (int32_t) prompt.size(), tokens.data(), (int32_t) tokens.size(), true, true);
+    if (count < 0) return env->NewStringUTF("Tokenlashda xato.");
+    tokens.resize((size_t) count);
+
+    llama_memory_clear(llama_get_memory(g_ctx), true);
+    llama_batch batch = llama_batch_get_one(tokens.data(), (int32_t) tokens.size());
+    if (llama_decode(g_ctx, batch) != 0)
+        return env->NewStringUTF("Model promptni qayta ishlay olmadi.");
+
+    llama_sampler_chain_params sampler_params = llama_sampler_chain_default_params();
+    llama_sampler * sampler = llama_sampler_chain_init(sampler_params);
+    llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
+    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.90f, 1));
+    llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7f));
+    llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
     std::string answer;
-
+    const int limit = max_tokens > 0 ? (max_tokens > 512 ? 512 : max_tokens) : 192;
     for (int i = 0; i < limit; ++i) {
-        llama_token token = llama_sampler_sample(
-            sampler,
-            g_ctx,
-            -1
-        );
-
-        if (llama_vocab_is_eog(g_vocab, token)) {
-            break;
-        }
-
+        llama_token token = llama_sampler_sample(sampler, g_ctx, -1);
+        if (llama_vocab_is_eog(g_vocab, token)) break;
         char piece[512];
-
-        int32_t n = llama_token_to_piece(
-            g_vocab,
-            token,
-            piece,
-            sizeof(piece),
-            0,
-            true
-        );
-
-        if (n > 0) {
-            answer.append(piece, (size_t) n);
-        }
-
-        llama_batch batch = llama_batch_get_one(
-            &token,
-            1
-        );
-
-        if (llama_decode(g_ctx, batch) != 0) {
-            break;
-        }
+        int32_t n = llama_token_to_piece(g_vocab, token, piece, sizeof(piece), 0, true);
+        if (n > 0) answer.append(piece, (size_t) n);
+        batch = llama_batch_get_one(&token, 1);
+        if (llama_decode(g_ctx, batch) != 0) break;
     }
-
     llama_sampler_free(sampler);
-
-    answer = remove_thinking(answer);
-
-    if (!answer.empty()) {
-        g_history.emplace_back(q, answer);
-
-        while (g_history.size() > MAX_HISTORY) {
-            g_history.pop_front();
-        }
-    }
-
     return env->NewStringUTF(answer.c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_asad_ai_NativeAI_nativeFree(
-    JNIEnv *,
-    jclass
-) {
+Java_com_asad_ai_NativeAI_nativeFree(JNIEnv *, jclass) {
     std::lock_guard<std::mutex> lock(g_mutex);
-
-    if (g_ctx) {
-        llama_free(g_ctx);
-        g_ctx = nullptr;
-    }
-
-    if (g_model) {
-        llama_model_free(g_model);
-        g_model = nullptr;
-    }
-
+    if (g_ctx) { llama_free(g_ctx); g_ctx = nullptr; }
+    if (g_model) { llama_model_free(g_model); g_model = nullptr; }
     g_vocab = nullptr;
+}  g_vocab = nullptr;
     g_history.clear();
 }
